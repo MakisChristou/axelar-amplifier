@@ -57,9 +57,6 @@ impl TonProof {
         let nonce = set.created_at as u128;
         let threshold = set.threshold.into();
 
-        println!("nonce: {}", nonce);
-        println!("threshold: {}", threshold);
-
         // todo: convert set.signers to HashMap<u16, WeightedSigner>,
         let dict: HashMap<u16, WeightedSigner> = set
             .signers
@@ -131,9 +128,6 @@ impl WeightedSigner {
         bytes.extend_from_slice(&self.signer);
         bytes.extend_from_slice(&self.weight.to_be_bytes());
         bytes.extend_from_slice(&self.signature);
-
-        println!("bytes: {}", vec_to_hex(bytes.clone()));
-
         assert!(bytes.len() == 112);
         bytes
     }
@@ -159,7 +153,7 @@ fn construct_proof(
 fn get_arced_cell(inner: &str) -> std::result::Result<Arc<Cell>, TonCellError> {
     Ok(Arc::new(
         buffer_to_cell(inner.as_bytes().to_vec())
-            .map_err(|_| TonCellError::InvalidInput("test".to_owned()))?,
+            .map_err(|_| TonCellError::InternalError("".to_owned()))?,
     ))
 }
 
@@ -169,22 +163,18 @@ fn message_to_cell(msg: Message) -> std::result::Result<Cell, TonCellError> {
     builder.store_reference(&get_arced_cell(&msg.cc_id.source_chain.to_string())?)?;
     builder.store_reference(&get_arced_cell(&msg.source_address)?)?;
 
-    let ton_address_buffer = TonAddress::from_str(&msg.destination_address)
-        .unwrap()
+    let ton_address_hash_buffer = TonAddress::from_str(&msg.destination_address)
+        .map_err(|_| TonCellError::InternalError("".to_owned()))?
         .hash_part
         .to_vec();
 
-    let ton_address_buffer_cell = buffer_to_cell(ton_address_buffer)
-        .map_err(|_| TonCellError::InternalError("test".to_owned()))?;
+    let ton_address_hash_buffer_cell = buffer_to_cell(ton_address_hash_buffer)
+        .map_err(|_| TonCellError::InternalError("".to_owned()))?;
 
-    builder.store_reference(&Arc::new(ton_address_buffer_cell.clone()))?; // problem this should be the Ton address hash!!! .storeRef(bufferToCell(msg.executableAddress.hash))
-
+    builder.store_reference(&Arc::new(ton_address_hash_buffer_cell.clone()))?; // problem this should be the Ton address hash!!! .storeRef(bufferToCell(msg.executableAddress.hash))
     builder.store_uint(256, &BigUint::from_bytes_be(&msg.payload_hash))?;
 
     let res = builder.build()?;
-
-    println!("Message: {:?} and in cell: {:?}\n", msg, res);
-    println!("destination_address: {:?}", ton_address_buffer_cell);
     Ok(res)
 }
 
@@ -227,9 +217,6 @@ impl TonMessages {
 
 fn construct_messages(messages: &Vec<Message>) -> Result<Cell, ContractError> {
     let ton_msgs = TonMessages::new(messages);
-
-    println!("ton_msgs: {:?}", ton_msgs);
-
     Ok(ton_msgs.to_cell()?)
 }
 
@@ -284,13 +271,17 @@ pub fn encode_execute_data(
         .to_boc_hex(true)
         .map_err(|_| ContractError::TonError)?;
 
-    Ok(HexBinary::from_hex(&cell_hex).unwrap())
+    Ok(HexBinary::from_hex(&cell_hex).map_err(|_| ContractError::TonError)?)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::encode_execute_data;
+    use crate::{test::test_data::domain_separator, Payload};
     use axelar_wasm_std::{nonempty, Participant};
     use cosmwasm_std::{Addr, HexBinary, Uint128};
+    use itertools::Itertools;
+    use multisig::key::KeyTyped;
     use multisig::{
         key::Signature,
         msg::{Signer, SignerWithSig},
@@ -298,13 +289,8 @@ mod tests {
     };
     use router_api::{CrossChainId, Message};
 
-    use super::encode_execute_data;
-    use crate::{test::test_data::domain_separator, Payload};
-    use itertools::Itertools;
-    use multisig::key::KeyTyped;
-
     #[test]
-    fn test_encoding() {
+    fn should_encode_approve_messages() {
         let domain_separator = domain_separator();
         let verifier_set = curr_ton_verifier_set();
 
@@ -321,7 +307,7 @@ mod tests {
         let encoded_execute_data =
             encode_execute_data(&verifier_set, signers_with_sigs, &payload).unwrap();
 
-        println!("encoded_execute_data: {:?}", encoded_execute_data);
+        assert_eq!(encoded_execute_data.to_string(), "b5ee9c7241020e0100026c0002080000002801020161800000000000000000000000000000018000000000000000000000000000000000000000000000000000000000000000c0030101c0040202ce05060102d007020120080900e1479b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad04966400000000000000000000000000000001194b84efeda7afe98c4d54d2ffb0c3f410b5d637fa3b4f01c97e18dbc412217d8b9bae50e9134e05e3ae1a4ab62e2762684397a2bfad6e51036344bfffd728098044056570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea74320a0b0c0d00e100e841effcf3842f875c374639d2f02659f9358c26e94357c777219904954c6e000000000000000000000000000000004960cbc52b9d7ba332563e4fed0bc00650277bd63a665d6ab7409a2f474114c3b92479eb36dbbd16de439c9a370980ef1a6f0b2f1697854111819cdfed4515c0e000e110f37008f48b57e7841f4681a4d15f4d747443adf4871c8464bd5bd779019974c00000000000000000000000000000006ea08b75d567ae0a299e106f61a6d2e6604c821940242f0719ee58c338a323351d44af7f7d4c31deeed78a376c580e1f93e6ac3f46816b88ab14a066a223f6036000883078666638323263383838303738353966663232366235386532346632343937346137306630346239343432353031616533386664363635623363363866333833342d30001267616e616368652d31005430783532343434663138333541646330323038366333374362323236353631363035653245313639396200404686a2c066c784a915f3e01c853d3195ed254c948e21adbb3e4a9b3f5f3c74d75fde9317");
     }
 
     fn signers_with_sigs<'a>(
