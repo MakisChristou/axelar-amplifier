@@ -6,6 +6,7 @@ use multisig::msg::SignerWithSig;
 use multisig::verifier_set::VerifierSet;
 use num_bigint::BigUint;
 use router_api::Message;
+use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -246,12 +247,98 @@ fn build_signer_rotation_body(set: &VerifierSet) -> Result<Cell, ContractError> 
     todo!()
 }
 
+fn compute_data_hash(msgs: &Vec<Message>) -> Hash {
+    let mut concatenated: Vec<u8> = Vec::new();
+
+    for msg in msgs.clone() {
+        let message_id = msg.cc_id.message_id;
+        let source_chain = msg.cc_id.source_chain;
+        let source_contract_address = msg.source_address;
+        let contract_address = msg.destination_address;
+        let destination_chain = msg.destination_chain;
+        let payload_hash = msg.payload_hash;
+
+        concatenated.extend(message_id.as_bytes());
+
+        concatenated.extend(source_chain.to_string().as_bytes());
+        concatenated.extend(source_contract_address.as_bytes());
+
+        let ton_address_hash_buffer = TonAddress::from_str(&contract_address)
+            .map_err(|_| TonCellError::InternalError("".to_owned()))
+            .unwrap()
+            .hash_part
+            .to_vec();
+
+        concatenated.extend(ton_address_hash_buffer);
+        concatenated.extend(destination_chain.to_string().as_bytes());
+        concatenated.extend(payload_hash.as_slice());
+    }
+
+    Keccak256::digest(concatenated).into()
+}
+
+fn compute_verifier_set_hash(verifier_set: &VerifierSet) -> Hash {
+    let mut data = Vec::new();
+    data.extend(verifier_set.threshold.to_be_bytes());
+
+    // Convert nonce to 256-bit (32 bytes)
+    let mut nonce_bytes = [0u8; 32];
+    let nonce_be = verifier_set.created_at.to_be_bytes();
+    nonce_bytes[32 - nonce_be.len()..].copy_from_slice(&nonce_be);
+    data.extend(nonce_bytes);
+
+    let mut current_hash = Keccak256::digest(data);
+
+    let first_key = "verifier0";
+    let first_verifier = verifier_set.signers.get(first_key).unwrap();
+
+    // Process first signer
+    let mut hasher = Keccak256::new();
+    hasher.update(0u16.to_be_bytes());
+    hasher.update(&first_verifier.pub_key);
+    hasher.update(&first_verifier.weight.to_be_bytes());
+    hasher.update(&current_hash);
+    current_hash = hasher.finalize();
+
+    // Process remaining signers
+    for i in 1..verifier_set.signers.len() {
+        let signer = verifier_set.signers.get(&format!("verifier{}", i)).unwrap();
+
+        let mut hasher = Keccak256::new();
+        hasher.update((i as u16).to_be_bytes());
+        hasher.update(&signer.pub_key);
+        hasher.update(&signer.weight.to_be_bytes());
+        hasher.update(&current_hash);
+        current_hash = hasher.finalize();
+    }
+
+    current_hash.into()
+}
+
 pub fn payload_digest(
     domain_separator: &Hash,
     verifier_set: &VerifierSet,
     payload: &Payload,
 ) -> Result<Hash, ContractError> {
-    todo!()
+    let hash = match payload {
+        Payload::Messages(msgs) => {
+            let data_hash = compute_data_hash(msgs);
+            let signers_hash = compute_verifier_set_hash(verifier_set);
+
+            let mut final_hash = Vec::new();
+
+            final_hash.extend(data_hash.to_vec());
+            final_hash.extend(signers_hash.to_vec());
+            final_hash.extend(domain_separator.to_vec());
+
+            Keccak256::digest(final_hash).into()
+        }
+        Payload::VerifierSet(set) => {
+            todo!()
+        }
+    };
+
+    Ok(hash)
 }
 fn vec_to_hex(vec: Vec<u8>) -> String {
     vec.iter().map(|byte| format!("{:02x}", byte)).collect()
@@ -276,8 +363,9 @@ pub fn encode_execute_data(
 
 #[cfg(test)]
 mod tests {
-    use super::encode_execute_data;
-    use crate::{test::test_data::domain_separator, Payload};
+    use super::{encode_execute_data, payload_digest};
+    use crate::encoding::ton::vec_to_hex;
+    use crate::Payload;
     use axelar_wasm_std::{nonempty, Participant};
     use cosmwasm_std::{Addr, HexBinary, Uint128};
     use itertools::Itertools;
@@ -291,15 +379,13 @@ mod tests {
 
     #[test]
     fn should_encode_approve_messages() {
-        let domain_separator = domain_separator();
         let verifier_set = curr_ton_verifier_set();
-
         let payload = Payload::Messages(ton_messages());
 
         let sigs: Vec<_> = vec![
-            "25832f14ae75ee8cc958f93fb42f0019409def58e99975aadd0268bd1d04530ee491e7acdb6ef45b790e7268dc2603bc69bc2cbc5a5e15044606737fb5145703",
-            "ba822dd7559eb828a67841bd869b4b99813208650090bc1c67b9630ce28c8cd47512bdfdf530c77bbb5e28ddb160387e4f9ab0fd1a05ae22ac52819a888fd80d",
-            "194b84efeda7afe98c4d54d2ffb0c3f410b5d637fa3b4f01c97e18dbc412217d8b9bae50e9134e05e3ae1a4ab62e2762684397a2bfad6e51036344bfffd72809",
+            "6dce1b2f0a4e14c81d7ed24326d16cb38a596dd34318f0c28f84041cef8537331750c6273898dd8ea3d614ab5101cab27eb36f00940c0dbdcf2111bc8bd79f0f",
+            "cbda5213e3a30172fb88b4038c39d223be29bc4656a36c4078ec7eaaaf8e4e496d72a0ba3af1e1d53f1d988d7bf68ab6968654bf031b915fa660245c09a81c07",
+            "d3ab834fc46a5eaccdfdf36b28cc1df759b26d98520303fe5643ee1480cb17f65758314043e9734922c200f14b236a898618679d3a0cc2a203ee094f470efa0f",
         ].into_iter().map(|sig| HexBinary::from_hex(sig).unwrap()).collect();
 
         let signers_with_sigs = signers_with_sigs(verifier_set.signers.values(), sigs);
@@ -307,7 +393,21 @@ mod tests {
         let encoded_execute_data =
             encode_execute_data(&verifier_set, signers_with_sigs, &payload).unwrap();
 
-        assert_eq!(encoded_execute_data.to_string(), "b5ee9c7241020e0100026c0002080000002801020161800000000000000000000000000000018000000000000000000000000000000000000000000000000000000000000000c0030101c0040202ce05060102d007020120080900e1479b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad04966400000000000000000000000000000001194b84efeda7afe98c4d54d2ffb0c3f410b5d637fa3b4f01c97e18dbc412217d8b9bae50e9134e05e3ae1a4ab62e2762684397a2bfad6e51036344bfffd728098044056570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea74320a0b0c0d00e100e841effcf3842f875c374639d2f02659f9358c26e94357c777219904954c6e000000000000000000000000000000004960cbc52b9d7ba332563e4fed0bc00650277bd63a665d6ab7409a2f474114c3b92479eb36dbbd16de439c9a370980ef1a6f0b2f1697854111819cdfed4515c0e000e110f37008f48b57e7841f4681a4d15f4d747443adf4871c8464bd5bd779019974c00000000000000000000000000000006ea08b75d567ae0a299e106f61a6d2e6604c821940242f0719ee58c338a323351d44af7f7d4c31deeed78a376c580e1f93e6ac3f46816b88ab14a066a223f6036000883078666638323263383838303738353966663232366235386532346632343937346137306630346239343432353031616533386664363635623363363866333833342d30001267616e616368652d31005430783532343434663138333541646330323038366333374362323236353631363035653245313639396200404686a2c066c784a915f3e01c853d3195ed254c948e21adbb3e4a9b3f5f3c74d75fde9317");
+        assert_eq!(encoded_execute_data.to_string(), "b5ee9c7241020e0100026c0002080000002801020161800000000000000000000000000000018000000000000000000000000000000000000000000000000000000000000000c0030101c0040202ce05060102d007020120080900e1479b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad04966400000000000000000000000000000001d3ab834fc46a5eaccdfdf36b28cc1df759b26d98520303fe5643ee1480cb17f65758314043e9734922c200f14b236a898618679d3a0cc2a203ee094f470efa0f8044056570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea74320a0b0c0d00e100e841effcf3842f875c374639d2f02659f9358c26e94357c777219904954c6e000000000000000000000000000000005b7386cbc2938532075fb490c9b45b2ce2965b74d0c63c30a3e101073be14dccc5d43189ce263763a8f5852ad44072ac9facdbc02503036f73c8446f22f5e7c3e000e110f37008f48b57e7841f4681a4d15f4d747443adf4871c8464bd5bd779019974c000000000000000000000000000000072f69484f8e8c05cbee22d00e30e7488ef8a6f1195a8db101e3b1faaabe393925b5ca82e8ebc78754fc766235efda2ada5a1952fc0c6e457e9980917026a0701e000883078666638323263383838303738353966663232366235386532346632343937346137306630346239343432353031616533386664363635623363363866333833342d30001267616e616368652d31005430783532343434663138333541646330323038366333374362323236353631363035653245313639396200404686a2c066c784a915f3e01c853d3195ed254c948e21adbb3e4a9b3f5f3c74d7b9694602");
+    }
+
+    #[test]
+    fn should_compute_correct_payload_hash() {
+        let domain_separator = ton_domain_separator();
+        let verifier_set = curr_ton_verifier_set();
+        let payload = Payload::Messages(ton_messages());
+
+        let payload_digest = payload_digest(&domain_separator, &verifier_set, &payload).unwrap();
+
+        assert_eq!(
+            vec_to_hex(payload_digest.to_vec()),
+            "e8214b369d9f4b11f4f0f7d2c921b56e9a34033e8f7f8599abe819b3cb7de2e0"
+        );
     }
 
     fn signers_with_sigs<'a>(
@@ -361,7 +461,7 @@ mod tests {
             destination_address: "EQBGhqLAZseEqRXz4ByFPTGV7SVMlI4hrbs-Sps_Xzx01x8G"
                 .parse()
                 .unwrap(),
-            destination_chain: "ganache-0".parse().unwrap(),
+            destination_chain: "ton".parse().unwrap(),
             payload_hash: HexBinary::from_hex(
                 "56570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea7432", // keccak256("0x1234");
             )
@@ -369,5 +469,12 @@ mod tests {
             .to_array::<32>()
             .unwrap(),
         }]
+    }
+
+    pub fn ton_domain_separator() -> [u8; 32] {
+        HexBinary::from_hex("6973c72935604464b28827141b0a463af8e3487616de69c5aa0c785392c9fb9f")
+            .unwrap()
+            .to_array()
+            .unwrap()
     }
 }
