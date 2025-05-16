@@ -20,6 +20,17 @@ use crate::payload::Payload;
 const OP_APPROVE_MESSAGES: usize = 0x00000028;
 const OP_START_SIGNER_ROTATION: usize = 0x00000014;
 const BYTES_PER_CELL: usize = 96;
+const THRESHOLD_BITS: usize = 128;
+const NONCE_BITS: usize = 256;
+const WEIGHTED_SIGNER_BYTES: usize = 112;
+const DICTIONARY_KEY_BITS: usize = 16;
+const OPCODE_BITS: usize = 32;
+const PAYLOAD_HASH_BITS: usize = 256;
+const BITS_PER_BYTE: usize = 8;
+const SIGNATURE_BITS: usize = 512;
+const SIGNATURE_BYTES: usize = SIGNATURE_BITS / BITS_PER_BYTE;
+const SIGNER_PUBKEY_BITS: usize = 256;
+const SIGNER_PUBKEY_BYTES: usize = SIGNER_PUBKEY_BITS / BITS_PER_BYTE;
 
 fn build_cell_chain(start_index: usize, buffer: Vec<u8>) -> Result<Cell, ContractError> {
     let mut builder = CellBuilder::new();
@@ -28,7 +39,7 @@ fn build_cell_chain(start_index: usize, buffer: Vec<u8>) -> Result<Cell, Contrac
     // Store bytes in the current cell
     for i in start_index..end_index {
         builder
-            .store_uint(8, &BigUint::from(buffer[i]))
+            .store_uint(BITS_PER_BYTE, &BigUint::from(buffer[i]))
             .map_err(|_| ContractError::TonError)?;
     }
 
@@ -67,11 +78,11 @@ impl TonProof {
             .map(|(i, signer)| {
                 let pub_key_bytes = match &signer.pub_key {
                     PublicKey::Ed25519(key) => key.as_slice().try_into().unwrap(),
-                    _ => todo!(),
+                    _ => panic!("Only Ed25519 pubkeys are supported in Ton"),
                 };
                 let signature_bytes = match &signatures[i].signature {
                     Signature::Ed25519(sig) => sig.as_slice().try_into().unwrap(),
-                    _ => todo!(),
+                    _ => panic!("Only Ed25519 signatures are supported in Ton"),
                 };
                 (
                     i as u16,
@@ -88,20 +99,18 @@ impl TonProof {
     }
 
     pub fn to_cell(&self) -> Result<Cell, ContractError> {
-        let key_len_bits = 16;
         let mut builder = CellBuilder::new();
-
         let nonce = BigUint::from(self.nonce);
         let threshold = BigUint::from(self.threshold);
 
         builder
-            .store_dict(key_len_bits, val_writer_buffer, self.dict.clone())
+            .store_dict(DICTIONARY_KEY_BITS, val_writer_buffer, self.dict.clone())
             .map_err(|_| ContractError::TonError)?;
         builder
-            .store_uint(128, &threshold)
+            .store_uint(THRESHOLD_BITS, &threshold)
             .map_err(|_| ContractError::TonError)?;
         builder
-            .store_uint(256, &nonce)
+            .store_uint(NONCE_BITS, &nonce)
             .map_err(|_| ContractError::TonError)?;
         let dict_cell = builder.build().map_err(|_| ContractError::TonError)?;
 
@@ -111,13 +120,17 @@ impl TonProof {
 
 #[derive(Clone, Debug, Copy)]
 struct WeightedSigner {
-    signer: [u8; 32],
+    signer: [u8; SIGNER_PUBKEY_BYTES],
     weight: u128,
-    signature: [u8; 64],
+    signature: [u8; SIGNATURE_BYTES],
 }
 
 impl WeightedSigner {
-    pub fn new(signer: [u8; 32], weight: u128, signature: [u8; 64]) -> Self {
+    pub fn new(
+        signer: [u8; SIGNER_PUBKEY_BYTES],
+        weight: u128,
+        signature: [u8; SIGNATURE_BYTES],
+    ) -> Self {
         WeightedSigner {
             signer,
             weight,
@@ -130,7 +143,7 @@ impl WeightedSigner {
         bytes.extend_from_slice(&self.signer);
         bytes.extend_from_slice(&self.weight.to_be_bytes());
         bytes.extend_from_slice(&self.signature);
-        assert!(bytes.len() == 112);
+        assert!(bytes.len() == WEIGHTED_SIGNER_BYTES);
         bytes
     }
 }
@@ -169,12 +182,13 @@ fn message_to_cell(msg: Message) -> std::result::Result<Cell, TonCellError> {
         .map_err(|_| TonCellError::InternalError("".to_owned()))?
         .hash_part
         .to_vec();
-
     let ton_address_hash_buffer_cell = buffer_to_cell(ton_address_hash_buffer)
         .map_err(|_| TonCellError::InternalError("".to_owned()))?;
-
     builder.store_reference(&Arc::new(ton_address_hash_buffer_cell.clone()))?; // problem this should be the Ton address hash!!! .storeRef(bufferToCell(msg.executableAddress.hash))
-    builder.store_uint(256, &BigUint::from_bytes_be(&msg.payload_hash))?;
+    builder.store_uint(
+        PAYLOAD_HASH_BITS,
+        &BigUint::from_bytes_be(&msg.payload_hash),
+    )?;
 
     let res = builder.build()?;
     Ok(res)
@@ -205,11 +219,10 @@ impl TonMessages {
     }
 
     pub fn to_cell(&self) -> Result<Cell, ContractError> {
-        let key_len_bits = 16;
         let mut builder = CellBuilder::new();
 
         builder
-            .store_dict(key_len_bits, val_writer_cell, self.dict.clone())
+            .store_dict(DICTIONARY_KEY_BITS, val_writer_cell, self.dict.clone())
             .map_err(|_| ContractError::TonError)?;
         let dict_cell = builder.build().map_err(|_| ContractError::TonError)?;
 
@@ -232,7 +245,7 @@ fn build_approve_messages_body(
 
     let mut builder = CellBuilder::new();
     builder
-        .store_uint(32, &BigUint::from(OP_APPROVE_MESSAGES))
+        .store_uint(OPCODE_BITS, &BigUint::from(OP_APPROVE_MESSAGES))
         .map_err(|_| ContractError::TonError)?;
     builder
         .store_reference(&Arc::new(proof))
@@ -256,7 +269,7 @@ fn build_signer_rotation_body(
 
     let mut builder = CellBuilder::new();
     builder
-        .store_uint(32, &BigUint::from(OP_START_SIGNER_ROTATION))
+        .store_uint(OPCODE_BITS, &BigUint::from(OP_START_SIGNER_ROTATION))
         .map_err(|_| ContractError::TonError)?;
     builder
         .store_reference(&Arc::new(candidate_config_hash_cell))
@@ -303,9 +316,9 @@ fn compute_verifier_set_hash(verifier_set: &VerifierSet) -> Hash {
     data.extend(verifier_set.threshold.to_be_bytes());
 
     // Convert nonce to 256-bit (32 bytes)
-    let mut nonce_bytes = [0u8; 32];
+    let mut nonce_bytes = [0u8; NONCE_BITS / 8];
     let nonce_be = verifier_set.created_at.to_be_bytes();
-    nonce_bytes[32 - nonce_be.len()..].copy_from_slice(&nonce_be);
+    nonce_bytes[NONCE_BITS / 8 - nonce_be.len()..].copy_from_slice(&nonce_be);
     data.extend(nonce_bytes);
 
     let mut current_hash = Keccak256::digest(data);
@@ -386,9 +399,6 @@ pub fn payload_digest(
     Ok(hash)
 }
 
-fn vec_to_hex(vec: Vec<u8>) -> String {
-    vec.iter().map(|byte| format!("{:02x}", byte)).collect()
-}
 
 pub fn encode_execute_data(
     verifier_set: &VerifierSet,
@@ -412,7 +422,6 @@ pub fn encode_execute_data(
 #[cfg(test)]
 mod tests {
     use super::{encode_execute_data, payload_digest};
-    use crate::encoding::ton::vec_to_hex;
     use crate::Payload;
     use axelar_wasm_std::{nonempty, Participant};
     use cosmwasm_std::{Addr, HexBinary, Uint128};
@@ -510,7 +519,7 @@ mod tests {
             .collect()
     }
 
-    pub fn curr_ton_verifier_set() -> VerifierSet {
+    fn curr_ton_verifier_set() -> VerifierSet {
         let pub_keys = vec![
             "03A107BFF3CE10BE1D70DD18E74BC09967E4D6309BA50D5F1DDC8664125531B8",
             "43CDC023D22D5F9E107D1A0693457D35D1D10EB7D21C721192F56F5DE40665D3",
@@ -520,7 +529,7 @@ mod tests {
         ton_verifier_set_from_pub_keys(&pub_keys)
     }
 
-    pub fn ton_verifier_set_from_pub_keys(pub_keys: &Vec<&str>) -> VerifierSet {
+    fn ton_verifier_set_from_pub_keys(pub_keys: &Vec<&str>) -> VerifierSet {
         let participants: Vec<(_, _)> = (0..pub_keys.len())
             .map(|i| {
                 (
@@ -535,7 +544,7 @@ mod tests {
         VerifierSet::new(participants, Uint128::from(3u128), 1)
     }
 
-    pub fn ton_messages() -> Vec<Message> {
+    fn ton_messages() -> Vec<Message> {
         vec![Message {
             cc_id: CrossChainId::new(
                 "ganache-1",
@@ -558,10 +567,14 @@ mod tests {
         }]
     }
 
-    pub fn ton_domain_separator() -> [u8; 32] {
+    fn ton_domain_separator() -> [u8; 32] {
         HexBinary::from_hex("6973c72935604464b28827141b0a463af8e3487616de69c5aa0c785392c9fb9f")
             .unwrap()
             .to_array()
             .unwrap()
+    }
+
+    fn vec_to_hex(vec: Vec<u8>) -> String {
+        vec.iter().map(|byte| format!("{:02x}", byte)).collect()
     }
 }
