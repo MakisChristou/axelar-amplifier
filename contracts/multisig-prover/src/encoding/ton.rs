@@ -18,6 +18,7 @@ use crate::error::ContractError;
 use crate::payload::Payload;
 
 const OP_APPROVE_MESSAGES: usize = 0x00000028;
+const OP_START_SIGNER_ROTATION: usize = 0x00000014;
 const BYTES_PER_CELL: usize = 96;
 
 fn build_cell_chain(start_index: usize, buffer: Vec<u8>) -> Result<Cell, ContractError> {
@@ -243,8 +244,28 @@ fn build_approve_messages_body(
     Ok(builder.build().map_err(|_| ContractError::TonError)?)
 }
 
-fn build_signer_rotation_body(set: &VerifierSet) -> Result<Cell, ContractError> {
-    todo!()
+fn build_signer_rotation_body(
+    candidate_set: &VerifierSet,
+    current_set: &VerifierSet,
+    signatures: Vec<SignerWithSig>,
+) -> Result<Cell, ContractError> {
+    let proof = construct_proof(current_set, signatures)?;
+    let candidate_config_hash = compute_verifier_set_hash(candidate_set);
+    let candidate_config_hash_cell =
+        buffer_to_cell(candidate_config_hash.to_vec()).map_err(|_| ContractError::TonError)?;
+
+    let mut builder = CellBuilder::new();
+    builder
+        .store_uint(32, &BigUint::from(OP_START_SIGNER_ROTATION))
+        .map_err(|_| ContractError::TonError)?;
+    builder
+        .store_reference(&Arc::new(candidate_config_hash_cell))
+        .map_err(|_| ContractError::TonError)?;
+    builder
+        .store_reference(&Arc::new(proof))
+        .map_err(|_| ContractError::TonError)?;
+
+    Ok(builder.build().map_err(|_| ContractError::TonError)?)
 }
 
 fn compute_data_hash(msgs: &Vec<Message>) -> Hash {
@@ -376,7 +397,9 @@ pub fn encode_execute_data(
 ) -> Result<HexBinary, ContractError> {
     let cell_payload = match payload {
         Payload::Messages(msgs) => build_approve_messages_body(msgs, verifier_set, signatures)?,
-        Payload::VerifierSet(set) => build_signer_rotation_body(set)?,
+        Payload::VerifierSet(candidate_set) => {
+            build_signer_rotation_body(candidate_set, verifier_set, signatures)?
+        }
     };
 
     let cell_hex = cell_payload
@@ -419,6 +442,28 @@ mod tests {
             encode_execute_data(&verifier_set, signers_with_sigs, &payload).unwrap();
 
         assert_eq!(encoded_execute_data.to_string(), "b5ee9c7241020e0100026c0002080000002801020161800000000000000000000000000000018000000000000000000000000000000000000000000000000000000000000000c0030101c0040202ce05060102d007020120080900e1479b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad04966400000000000000000000000000000001d3ab834fc46a5eaccdfdf36b28cc1df759b26d98520303fe5643ee1480cb17f65758314043e9734922c200f14b236a898618679d3a0cc2a203ee094f470efa0f8044056570de287d73cd1cb6092bb8fdee6173974955fdef345ae579ee9f475ea74320a0b0c0d00e100e841effcf3842f875c374639d2f02659f9358c26e94357c777219904954c6e000000000000000000000000000000005b7386cbc2938532075fb490c9b45b2ce2965b74d0c63c30a3e101073be14dccc5d43189ce263763a8f5852ad44072ac9facdbc02503036f73c8446f22f5e7c3e000e110f37008f48b57e7841f4681a4d15f4d747443adf4871c8464bd5bd779019974c000000000000000000000000000000072f69484f8e8c05cbee22d00e30e7488ef8a6f1195a8db101e3b1faaabe393925b5ca82e8ebc78754fc766235efda2ada5a1952fc0c6e457e9980917026a0701e000883078666638323263383838303738353966663232366235386532346632343937346137306630346239343432353031616533386664363635623363363866333833342d30001267616e616368652d31005430783532343434663138333541646330323038366333374362323236353631363035653245313639396200404686a2c066c784a915f3e01c853d3195ed254c948e21adbb3e4a9b3f5f3c74d7b9694602");
+    }
+
+    #[test]
+    fn should_encode_rotate_signers() {
+        let verifier_set = curr_ton_verifier_set();
+
+        let mut new_ton_set = curr_ton_verifier_set();
+        new_ton_set.created_at += 1;
+        let payload = Payload::VerifierSet(new_ton_set);
+
+        let sigs: Vec<_> = vec![
+            "63d43de6b5780ea29849a82b9b616c3a7c8c5332e5a1b34408c2745eabf07e2c7d539134e3480e3b3e1ac689f9fff05047b9bb1ecf1208732cf53a39ae0fe701",
+            "e619721e05b552e3090dc4a48624ada4ff91a4a4fbd94e2347f1e9716d95c9f1e43c29c1613838ef7beb2daec16c036d0942cc274d15ea64020c5fd94af94205",
+            "9b7265c9660f8dd37e99e6c8e4e5fc020a1f0ddb9d55c3f352e826990af144485903cb41b47d6091f7c753ff5de667414be03bfe6a1d3f06513d949005a3500c",
+        ].into_iter().map(|sig| HexBinary::from_hex(sig).unwrap()).collect();
+
+        let signers_with_sigs = signers_with_sigs(verifier_set.signers.values(), sigs);
+
+        let encoded_execute_data =
+            encode_execute_data(&verifier_set, signers_with_sigs, &payload).unwrap();
+
+        assert_eq!(encoded_execute_data.to_string(), "b5ee9c72410208010001c10002080000001401020040ab98abb510250ae97f3834f06829b35e08d6711dd57753b9c16307aadb4e5d5c0161800000000000000000000000000000018000000000000000000000000000000000000000000000000000000000000000c0030202ce0405020120060700e1479b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664000000000000000000000000000000019b7265c9660f8dd37e99e6c8e4e5fc020a1f0ddb9d55c3f352e826990af144485903cb41b47d6091f7c753ff5de667414be03bfe6a1d3f06513d949005a3500c800e100e841effcf3842f875c374639d2f02659f9358c26e94357c777219904954c6e0000000000000000000000000000000058f50f79ad5e03a8a6126a0ae6d85b0e9f2314ccb9686cd102309d17aafc1f8b1f54e44d38d2038ecf86b1a27e7ffc1411ee6ec7b3c4821ccb3d4e8e6b83f9c06000e110f37008f48b57e7841f4681a4d15f4d747443adf4871c8464bd5bd779019974c000000000000000000000000000000079865c87816d54b8c243712921892b693fe469293ef65388d1fc7a5c5b65727c790f0a70584e0e3bdefacb6bb05b00db4250b309d3457a99008317f652be5081608ba483f1");
     }
 
     #[test]
