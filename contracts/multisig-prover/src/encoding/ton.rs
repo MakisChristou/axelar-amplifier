@@ -397,7 +397,6 @@ pub fn payload_digest(
     Ok(hash)
 }
 
-
 pub fn encode_execute_data(
     verifier_set: &VerifierSet,
     signatures: Vec<SignerWithSig>,
