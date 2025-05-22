@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use tonlib_core::cell::{Cell, CellBuilder, TonCellError};
-use tonlib_core::tlb_types::tlb::TLB;
+use tonlib_core::tlb_types::traits::TLBObject;
 use tonlib_core::TonAddress;
 
 use crate::error::ContractError;
