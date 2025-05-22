@@ -20,7 +20,7 @@ pub enum AddressFormat {
     Eip55,
     Sui,
     Stellar,
-    Ton
+    Ton,
 }
 
 pub fn validate_address(address: &str, format: &AddressFormat) -> Result<(), Error> {
